@@ -91,7 +91,7 @@ app.get('/codecs', async (c) => {
       supported_target_codecs: VALID_CODECS,
       supported_presets: VALID_PRESETS,
       supported_audio_modes: VALID_AUDIO_MODES,
-      supported_target_heights: [0, 480, 720, 1080, 1440, 2160],
+      supported_target_heights: [0, 360, 480, 576, 720, 1080, 1440, 2160],
     })
   } catch (err) {
     return c.json(

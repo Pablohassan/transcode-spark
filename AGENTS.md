@@ -170,6 +170,22 @@ export interface ApiError {
 | **Quality-first** (archive, master copies) | `cq` (no bitrate) + `preset=p4..p6` | Adaptive bitrate, better quality per byte |
 | **Streaming/live** | `target_bitrate` + `preset=p1` | Predictable network usage |
 
+### Common content types & recommended params
+
+| Content type | Source typique | `target_height` | `target_bitrate` | Notes |
+|---|---|---|---|---|
+| **Series TV vintage PAL** (Mariés deux enfants, Friends, etc.) | HEVC/MPEG2 720×576 | `576` (keep) or `480` (smaller) | `1000k` (576p) / `800k` (480p) | PAL source typique ~576p |
+| **Series TV NTSC** | 720×480 | `480` (keep) | `800k` | NTSC = 480p natif |
+| **Series TV HD** | 1280×720 / 1920×1080 HEVC | `720` | `2500k` | Streaming-friendly |
+| **Films modernes 1080p** | 1920×1080 HEVC/AV1 | `1080` (keep) | `4000k` | Quality > size |
+| **Anime 480p/576p** | Variable | `480` | `1200k` (motion forte) | Anime: motion + lines, bitrate plus eleve qu'attendu |
+| **YouTube ingest** | Variable | `720` ou `1080` | `2500k` / `4000k` | Bitrate haut pour pas perdre en compression YouTube |
+| **Archive long terme** | Master HD | `0` (no rescale) | (omit) + `cq=20` + `preset=p5` | Quality target, taille adaptative |
+
+**Note sur le 576p (PAL)** : si ta source est déjà 576p, `target_height=576` ne fait **aucun rescale**
+(le code skip le filter scale_cuda si `input.height <= target_height`) → encode pur NVENC, vitesse max.
+Pour downscaler 576p → 480p, mettre `target_height=480` (le code applique `scale_cuda=-2:480`).
+
 ## 5. GET /jobs/{id} — Polling Spec
 
 Poll every **2-5 seconds** until `status === 'done' || status === 'failed'`.
