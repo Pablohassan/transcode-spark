@@ -213,13 +213,18 @@ function buildFfmpegArgs(job: Job, outPath: string, progressPath: string): strin
  * Lance un loop de progress tracking en parallele (non bloquant).
  */
 async function startFfmpeg(job: Job): Promise<void> {
+  // CRITIQUE: reserver le slot avant tout await. Sinon processQueue itere sur les
+  // jobs queued, lance startFfmpeg(job1), await Bun.write rend la main au caller,
+  // job1.status est encore 'queued' -> countRunning() = 0 -> lance job2, job3...
+  // Resultat: MAX_CONCURRENT_JOBS=1 contourne, 4 ffmpeg parallels -> OOM/SIGKILL 137.
+  job.status = 'running'
+  job.startedAt = Date.now()
+
   const outPath = `${outputDir}/${job.id}.mp4`
   const progressPath = `${outputDir}/${job.id}.progress`
 
   await Bun.write(progressPath, '')
 
-  job.status = 'running'
-  job.startedAt = Date.now()
   job.output = { path: outPath, sizeBytes: 0, ready: false }
 
   const args = buildFfmpegArgs(job, outPath, progressPath)

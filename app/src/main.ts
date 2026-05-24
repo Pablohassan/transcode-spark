@@ -230,12 +230,16 @@ app.get('/jobs/:id/output', async (c) => {
   }
 
   // Streaming download (le browser/client telecharge le fichier)
+  // RFC 5987: fallback ASCII + filename* UTF-8 percent-encoded.
+  // Bun rejette tout char > 0x7F dans une valeur de header (RFC 7230 strict).
   const downloadName = job.input.filename.replace(/\.[^.]+$/, '') + '.mp4'
+  const asciiSafe = downloadName.replace(/[^\x20-\x7E]/g, '_').replace(/"/g, "'")
+  const utf8Encoded = encodeURIComponent(downloadName)
   return new Response(fileBun.stream(), {
     headers: {
       'Content-Type': 'video/mp4',
       'Content-Length': String(job.output.sizeBytes),
-      'Content-Disposition': `attachment; filename="${downloadName}"`,
+      'Content-Disposition': `attachment; filename="${asciiSafe}"; filename*=UTF-8''${utf8Encoded}`,
       'Cache-Control': 'no-store',
     },
   })
