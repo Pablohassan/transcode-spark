@@ -1,0 +1,46 @@
+# docker-compose.yml pour transcode-service
+# Cible: Spark A (.31), aarch64, GPU NVIDIA GB10
+# Usage: orchestre via systemd "transcode-waker.service" qui fait `docker compose up/stop`
+#
+# Note runtime GPU: Docker 29.x supporte la directive moderne `gpus`
+# alternative: deploy.resources.reservations.devices si gpus: all ne fonctionne pas
+services:
+  ffmpeg:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: transcode-ffmpeg:latest
+    container_name: transcode-ffmpeg
+    restart: "no"   # Le waker gere le lifecycle, pas docker
+    init: true
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+      TZ: Europe/Paris
+    ports:
+      # Bind sur localhost uniquement - le waker proxy depuis .31:8000 vers 127.0.0.1:8001
+      - "127.0.0.1:8001:8001"
+    volumes:
+      - transcode-data:/data
+    # Acces GPU via nvidia-container-toolkit + CDI (Docker 29+)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video]
+    # Limites pour eviter de saturer le Spark si runaway
+    cpus: "8"
+    mem_limit: 16g
+    # Healthcheck propre
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  transcode-data:
+    driver: local

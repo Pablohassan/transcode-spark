@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Docker
+*.tar
+*.tar.gz
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Secrets
+.env
+*.htpasswd*
+*.key
+*.pem
+*.crt
+
+# Data (videos lourdes)
+data/
+*.mp4
+*.mkv
+*.avi
+*.webm
+*.mov
+
+# Logs
+*.log
+logs/
+
+# Local builds
+build/
+dist/
+
+# Test outputs
+test-output/
