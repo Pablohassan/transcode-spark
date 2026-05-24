@@ -1,0 +1,58 @@
+# systemd unit pour transcode-waker
+#
+# A installer sur l'host Spark A (commandes sudo a lancer 1 fois par l'operateur):
+#   sudo cp /home/pablo/transcode-waker/transcode-waker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now transcode-waker
+#
+# Logs: journalctl -u transcode-waker -f
+# Status: systemctl status transcode-waker
+[Unit]
+Description=transcode-waker (scale-to-zero orchestrator pour transcode-service)
+Documentation=file:///home/pablo/transcode-service/README.md
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=pablo
+Group=pablo
+
+# pablo est deja dans le groupe docker (verifie: groups pablo)
+SupplementaryGroups=docker
+
+WorkingDirectory=/home/pablo/transcode-waker
+ExecStart=/home/pablo/.local/bin/bun run src/main.ts
+
+# Environment variables
+Environment=BACKEND_URL=http://127.0.0.1:8001
+Environment=COMPOSE_DIR=/home/pablo/transcode-service
+Environment=IDLE_TIMEOUT_MIN=30
+Environment=WAKE_TIMEOUT_S=30
+Environment=LISTEN_PORT=8000
+Environment=NODE_ENV=production
+Environment=HOME=/home/pablo
+
+# Restart policy
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Logging vers journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=transcode-waker
+
+# Hardening leger (assez permissif pour permettre docker compose)
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Resource limits (waker ultra-leger, ces limites sont des garde-fous)
+MemoryMax=200M
+TasksMax=64
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

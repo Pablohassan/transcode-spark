@@ -12,7 +12,7 @@ services:
     image: transcode-ffmpeg:latest
     container_name: transcode-ffmpeg
     restart: "no"   # Le waker gere le lifecycle, pas docker
-    init: true
+    # init: true retire - on a deja tini en ENTRYPOINT dans le Dockerfile
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,video,utility

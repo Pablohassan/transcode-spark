@@ -99,9 +99,30 @@ FROM nvidia/cuda:12.6.0-runtime-ubuntu22.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Runtime deps (libs dynamiques + curl pour healthcheck + unzip pour Bun)
+# Runtime deps:
+# - libs dynamiques utilisees par le binaire ffmpeg compile en stage 1
+#   (ffmpeg --enable-static rend les libs internes statiques mais reste linke
+#    dynamiquement aux codecs externes libvpx/libaom/libfreetype/etc.)
+# - curl pour healthcheck
+# - unzip pour installer Bun
+# - tini comme init proper (zombie reaping)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libnuma1 \
+    libfreetype6 \
+    libvpx7 \
+    libwebp7 \
+    libwebpmux3 \
+    libdav1d5 \
+    libaom3 \
+    libfdk-aac2 \
+    libmp3lame0 \
+    libopus0 \
+    libtheora0 \
+    libvorbis0a \
+    libvorbisenc2 \
+    libx264-163 \
+    libx265-199 \
+    libssl3 \
     ca-certificates \
     curl \
     unzip \

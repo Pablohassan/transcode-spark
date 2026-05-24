@@ -1,0 +1,24 @@
+# =============================================================================
+# transcode.agi-so.fr.conf.bootstrap - Config HTTP-only initiale
+#
+# Utilise UNIQUEMENT le temps d'obtenir le cert Let's Encrypt via:
+#   sudo certbot certonly --webroot -w /var/www/html -d transcode.agi-so.fr
+#
+# Une fois le cert obtenu, remplacer ce fichier par transcode.agi-so.fr.conf
+# (qui contient le block HTTPS avec ssl_certificate explicite)
+# =============================================================================
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name transcode.agi-so.fr;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+
+    location / {
+        return 200 "transcode.agi-so.fr bootstrap - cert not yet issued\n";
+        add_header Content-Type text/plain;
+    }
+}
