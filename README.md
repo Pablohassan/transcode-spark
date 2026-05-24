@@ -27,7 +27,8 @@ Internet --HTTPS--> Freebox 82.65.17.134 --DNAT 443--> VIP .200 (keepalived)
                                               container Docker "transcode-ffmpeg"
                                               - base nvidia/cuda:12.6.0-runtime
                                               - ffmpeg compile avec NVENC + libnpp
-                                              - FastAPI service (POST /jobs, etc.)
+                                              - app Bun + Hono (~50 Mo RAM)
+                                              - Endpoints: POST /jobs, etc.
                                               - Volume /data
                                                               |
                                                               v
@@ -39,9 +40,9 @@ Internet --HTTPS--> Freebox 82.65.17.134 --DNAT 443--> VIP .200 (keepalived)
 
 | Dossier | Role | Tourne ou |
 |---|---|---|
-| `docker/Dockerfile` | Image multi-stage: builder (compile ffmpeg+NVENC) + runtime (CUDA + FastAPI) | Build sur Spark A |
-| `app/` | Code FastAPI dans le container | Container ffmpeg sur Spark A |
-| `waker/` | Service Python systemd toujours up qui orchestre le container | Host Spark A (`/opt/transcode-waker/`) |
+| `docker/Dockerfile` | Image multi-stage: builder (compile ffmpeg+NVENC) + runtime (CUDA + Bun + Hono) | Build sur Spark A |
+| `app/` | Code Hono+Bun (TS) dans le container | Container ffmpeg sur Spark A |
+| `waker/` | Service Bun+Hono systemd toujours up qui orchestre le container | Host Spark A (`/opt/transcode-waker/`) |
 | `nginx/` | Config nginx reverse proxy | Pi nginx .60 (`/etc/nginx/sites-enabled/`) |
 | `scripts/` | Deploy + build helpers | Lance depuis ton poste |
 | `docker-compose.yml` | Orchestration du container ffmpeg | Spark A |

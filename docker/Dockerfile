@@ -3,11 +3,11 @@
 # Multi-stage Dockerfile pour transcode-service
 # Cible: aarch64 (DGX Spark A, puce GB10 Grace+Blackwell)
 #
-# Stage 1 (builder): compile ffmpeg 7.1 avec support NVENC + libnpp + codecs courants
-# Stage 2 (runtime): image legere avec ffmpeg installe + FastAPI + dependances runtime
+# Stage 1 (builder): compile ffmpeg 7.1 statique avec NVENC + libnpp + codecs courants
+# Stage 2 (runtime): image legere avec ffmpeg + Bun + Hono app
 
 # =====================================================================
-# Stage 1: Builder
+# Stage 1: Builder ffmpeg
 # =====================================================================
 FROM nvidia/cuda:12.6.0-devel-ubuntu22.04 AS builder
 
@@ -93,22 +93,18 @@ RUN ./configure \
     && rm -rf /tmp/ffmpeg
 
 # =====================================================================
-# Stage 2: Runtime
+# Stage 2: Runtime - Bun + Hono + ffmpeg
 # =====================================================================
 FROM nvidia/cuda:12.6.0-runtime-ubuntu22.04 AS runtime
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+ENV DEBIAN_FRONTEND=noninteractive
 
-# Runtime deps (libs dynamiques utilisees par ffmpeg statique compile en stage 1)
+# Runtime deps (libs dynamiques + curl pour healthcheck + unzip pour Bun)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    python3-pip \
-    python3-venv \
     libnuma1 \
     ca-certificates \
     curl \
+    unzip \
     tini \
     && rm -rf /var/lib/apt/lists/*
 
@@ -116,26 +112,38 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /opt/ffmpeg/bin/ffmpeg /usr/local/bin/ffmpeg
 COPY --from=builder /opt/ffmpeg/bin/ffprobe /usr/local/bin/ffprobe
 
-# Python FastAPI app
-WORKDIR /app
-COPY app/requirements.txt /app/requirements.txt
-RUN pip3 install --no-cache-dir -r /app/requirements.txt
+# Install Bun (single binary aarch64)
+ARG BUN_VERSION=1.1.42
+RUN curl -fL -o /tmp/bun.zip \
+        "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-aarch64.zip" \
+    && cd /tmp && unzip -q bun.zip \
+    && mv bun-linux-aarch64/bun /usr/local/bin/bun \
+    && chmod +x /usr/local/bin/bun \
+    && rm -rf /tmp/bun* \
+    && bun --version
 
-COPY app/ /app/
+# Hono app dependencies
+WORKDIR /app
+COPY app/package.json ./
+# Note: pas de bun.lockb au premier build - bun install sans --frozen-lockfile
+RUN bun install --production
+
+# App source code
+COPY app/tsconfig.json ./
+COPY app/src ./src
 
 # Data volumes
-RUN mkdir -p /data/incoming /data/output /data/state \
-    && chown -R 1000:1000 /data
+RUN mkdir -p /data/incoming /data/output /data/state
 
-# Run as non-root user
-RUN useradd -u 1000 -m -s /bin/bash transcoder && \
-    chown -R transcoder:transcoder /app /data
+# Run as non-root user (UID 1000 pour matcher pablo sur host)
+RUN useradd -u 1000 -m -s /bin/bash transcoder \
+    && chown -R transcoder:transcoder /app /data
 USER transcoder
 
 EXPOSE 8001
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8001/health || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001", "--workers", "1"]
+CMD ["bun", "run", "src/main.ts"]
