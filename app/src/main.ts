@@ -249,8 +249,8 @@ export default {
   fetch: app.fetch,
   // Disable Bun idle timeout for long uploads/downloads
   idleTimeout: 0,
-  // 8 GB max body (mirror nginx config)
-  maxRequestBodySize: 8 * 1024 * 1024 * 1024,
+  // 12 GB max body (mirror nginx config client_max_body_size)
+  maxRequestBodySize: 12 * 1024 * 1024 * 1024,
 }
 
 console.log(`[transcode-service v${VERSION}] listening on :8001 (Bun ${Bun.version})`)

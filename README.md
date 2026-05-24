@@ -94,7 +94,7 @@ Voir `scripts/deploy.sh`. Workflow:
 - TLS Let's Encrypt auto-renew
 - Container Docker isole: pas d'acces au reste du LAN
 - Volume /data isole (pas de bind mount sur des chemins sensibles)
-- Quota: `client_max_body_size 8G`, `proxy_read_timeout 7200s`
+- Quota: `client_max_body_size 12G`, `proxy_read_timeout 7200s`
 
 ## Documentation cluster
 
