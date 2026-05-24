@@ -67,6 +67,8 @@ GET    /metrics              Prometheus metrics
 - **Goulot single-stream: TLS Pi nginx ~460 Mbps = 57 MB/s**
 - Vidéo 1 GB upload: ~18 s, 4 GB: ~71 s
 
+**Multi-stream**: 4 streams x 250 MiB → 626 Mbps cumulé. PARALLEL=2 default, PARALLEL=4 OK sur fibre 1 Gbps.
+
 NVENC GB10 Blackwell: H.264/HEVC/AV1 hardware encoding.
 4K AV1 encode: ~100+ fps. Transcode = nettement plus rapide que le transfert.
 

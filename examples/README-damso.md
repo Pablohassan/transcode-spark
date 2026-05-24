@@ -152,10 +152,11 @@ encode_one() {
 }
 ```
 
-## ⚡ Parametre `PARALLEL` — UTILISE PARALLEL=2
+## ⚡ Parametre `PARALLEL` — UTILISE PARALLEL=2 (ou 4 si fibre 1 Gbps)
 
-**TL;DR**: utilise toujours `PARALLEL=2` dans ton `reencode-tui.sh`. C'est **obligatoire**
-pour exploiter ta fibre 1 Gbps.
+**TL;DR**: utilise `PARALLEL=2` par defaut dans ton `reencode-tui.sh`. Si ta fibre fait bien
+1 Gbps a l'upload (Free Pop / 8K / similaire), tu peux monter a `PARALLEL=4` — test
+empirique 24/05 valide.
 
 ### Pourquoi PARALLEL=2 et pas 1, pas 4
 
@@ -178,13 +179,11 @@ Avec PARALLEL=2 sur 285 episodes 480p (~37 GB):
 #                                              ^ TARGET_HEIGHT=480
 ```
 
-### PARALLEL=3+: pas recommande
+### PARALLEL=4 OK sur fibre 1 Gbps
 
-Au-dela de 2, tu satures le TLS Pi cumul (~1200-1500 Mbps) → timeouts et retries.
-Ta fibre 1 Gbps est deja exploitee a fond avec PARALLEL=2.
-
-**Seule exception**: si Rusmir bascule un jour vers nginx mode `stream {}` (TLS passthrough,
-au-dela des 460 Mbps single-core), PARALLEL=1 redeviendra optimal.
+- PARALLEL=2 = default sain, marche partout
+- PARALLEL=4 = OK fibre 1 Gbps (mesure: 626 Mbps cumule, 4/4 streams OK)
+- Cold-start (>30 min idle) → 1 503 possible sur le 1er essai, retry suffit
 
 ## Parametres recommandes selon use case
 

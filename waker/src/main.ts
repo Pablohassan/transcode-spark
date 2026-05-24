@@ -194,4 +194,7 @@ export default {
   fetch: app.fetch,
   // Important: 0 = pas de timeout idle Bun sur les connexions (sinon coupe les uploads longs)
   idleTimeout: 0,
+  // 12 GB max body (mirror nginx client_max_body_size et app container maxRequestBodySize)
+  // Sans ca, Bun limite a ~128 MB par defaut -> 502 Broken pipe sur uploads gros fichiers
+  maxRequestBodySize: 12 * 1024 * 1024 * 1024,
 }

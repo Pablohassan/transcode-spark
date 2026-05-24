@@ -502,7 +502,7 @@ curl -sS -u "$TRANSCODE_API_AUTH" -X DELETE https://transcode.agi-so.fr/jobs/$JO
 | `404 Not Found` | Job doesn't exist or expired | **No** |
 | `409 Conflict` | Output not ready yet (poll instead) | Wait & poll |
 | `413 Payload Too Large` | File > 12 GB | **No** — split source |
-| `429 Too Many Requests` | nginx rate limit (10/min/IP) | **Yes** with backoff |
+| `429 Too Many Requests` | nginx rate limit (600/min/IP = 10/sec sustain, burst 50) | **Yes** with backoff |
 | `500 Internal Server Error` | Server fault (ffprobe failed, etc.) | Maybe — check response body |
 | `502 Bad Gateway` | nginx → backend down (waker cold-starting?) | **Yes** with 2-10s backoff |
 | `503 Service Unavailable` | Backend unhealthy | **Yes** with 5-30s backoff |
@@ -559,13 +559,18 @@ default `preset=p4` + `cq`. Use it for batch jobs unless quality is critical.
 - **Multi-stream PARALLEL=2: ~35-40 s** (effectif ~860-1000 Mbps)
 - PARALLEL=3: ~30 s (gain marginal, ne pas depasser sauf fibre > 1.5 Gbps)
 
-### ⚡ Best practice: PARALLEL=2 par defaut
+### ⚡ Best practice: PARALLEL=2 par defaut, PARALLEL=4 OK sur fibre 1 Gbps
+
+Mesure 2026-05-24: 4 streams x 250 MiB en parallele → 4/4 OK, **626 Mbps cumule**.
 
 **Pour tout batch de plus de 2 fichiers**, lancez **2 uploads HTTP en parallele** (cote client).
 Cela exploite les **4 workers TLS du Pi nginx** au lieu d'etre limite a un seul. Le serveur
 gere la queue cote ffmpeg (1 job actif a la fois sur NVENC), donc les fichiers au-dela du 1er
 sont uploads et stockes pendant que le 1er transcode → **vous masquez la latence reseau
 derriere le compute**. Voir code TypeScript section 8 (`transcodeBatch` + `withConcurrency`).
+
+**PARALLEL=4 OK sur fibre 1 Gbps** (mesure: 4/4 streams 250 MiB, 626 Mbps cumule).
+Cold-start (>30 min idle) peut donner 1 503 sur le 1er essai, retry suffit.
 
 ## 11. Security Notes for Agents
 
