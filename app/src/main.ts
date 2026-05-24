@@ -40,6 +40,14 @@ app.get('/', (c) =>
     service: 'transcode-service',
     version: VERSION,
     description: 'ffmpeg + NVENC transcode API (h264/hevc/av1)',
+    // Doc publique (sans auth) servie via nginx - cf. agents.md a la racine du domaine
+    docs_url: 'https://transcode.agi-so.fr/agents.md',
+    llms_txt: 'https://transcode.agi-so.fr/llms.txt',
+    auth: {
+      type: 'http_basic',
+      realm: 'transcode-service',
+      doc: 'Set HTTP header: Authorization: Basic <base64(user:password)>',
+    },
     endpoints: [
       'GET    /health',
       'GET    /codecs',

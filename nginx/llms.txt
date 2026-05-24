@@ -1,0 +1,33 @@
+# transcode-service
+
+> HTTP API for video transcoding via NVIDIA NVENC hardware encoder (GB10 Blackwell).
+> Built for batch transcoding of media libraries. Async jobs with polling pattern.
+
+## Base URL
+
+https://transcode.agi-so.fr
+
+## Authentication
+
+HTTP Basic Auth. Credentials transmitted out-of-band by the operator.
+Header format: `Authorization: Basic <base64(user:password)>`
+
+## Documentation
+
+- [API spec for agents](https://transcode.agi-so.fr/agents.md): complete TypeScript types, client class, endpoint specs, error codes, performance reference, retry strategy. **Read this first.**
+- [README](https://transcode.agi-so.fr/readme.md): human-readable overview, architecture diagram.
+
+## Endpoints (quick reference)
+
+- `GET    /`                 service descriptor (auto-discovery)
+- `GET    /health`           liveness check
+- `GET    /codecs`           list NVENC encoders + supported params
+- `POST   /jobs`             multipart upload + start transcode job
+- `GET    /jobs`             list all jobs
+- `GET    /jobs/{id}`        get job state + progress (poll this)
+- `GET    /jobs/{id}/output` streaming download transcoded file
+- `DELETE /jobs/{id}`        cleanup job
+
+## Optional
+
+- [Bash client wrapper](https://transcode.agi-so.fr/transcode-api-client.sh): sourceable bash function `transcode_via_api`

@@ -11,6 +11,8 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASTION="lazone@82.65.17.134"
 SPARK="pablo@192.168.1.31"
 REMOTE_DIR="/home/pablo/transcode-service"
+PI_NGINX="pablito@192.168.1.200"
+PI_DOC_DIR="/var/www/transcode"
 
 ACTION="${1:-sync}"
 
@@ -26,6 +28,15 @@ rsync -avz --delete \
 
 case "${ACTION}" in
     sync)
+        echo "==> Sync docs publiques vers Pi nginx (${PI_DOC_DIR})"
+        # Copie atomique via /tmp puis sudo cp (NOPASSWD configure)
+        rsync -avz \
+            "${REPO_DIR}/AGENTS.md" \
+            "${REPO_DIR}/README.md" \
+            "${REPO_DIR}/nginx/llms.txt" \
+            "${REPO_DIR}/scripts/transcode-api-client.sh" \
+            "${PI_NGINX}:/tmp/" 2>&1 | tail -5
+        ssh "${PI_NGINX}" "sudo mkdir -p ${PI_DOC_DIR} && sudo cp /tmp/AGENTS.md /tmp/README.md /tmp/llms.txt /tmp/transcode-api-client.sh ${PI_DOC_DIR}/ && sudo chmod 644 ${PI_DOC_DIR}/*"
         echo "==> Sync done. Pour build l'image: ./scripts/deploy.sh build"
         ;;
     build)
