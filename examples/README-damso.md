@@ -6,21 +6,46 @@ sur le bloc NVENC hardware (jusqu'a ~100x realtime sur 480p), et tu downloads le
 
 ## Setup en 30 secondes
 
+### Etape 1 — Recupere le credential via Vault wrap (one-shot, 24h)
+
+Rusmir te transmet via Signal/Telegram un wrap token de la forme `hvs.CAESI...`.
+Tu deroules le wrap (USAGE UNIQUE, expire dans 24h):
+
 ```bash
-# 1. Recupere le wrapper
-curl -O https://transcode.agi-so.fr/static/transcode-api-client.sh
-# OU clone le repo / scp depuis Rusmir
-chmod +x transcode-api-client.sh
+CRED=$(curl -sS -X POST -H "X-Vault-Token: hvs.CAESI..." \
+     https://vault.agi-so.fr/v1/sys/wrapping/unwrap | jq -r '.data.TRANS_SPARK_API')
 
-# 2. Variables d'env (a mettre dans ~/.bashrc ou ton script)
-export TRANSCODE_API_AUTH='transcode:LE_PASSWORD_QUE_RUSMIR_T_A_DONNE'
-export TRANSCODE_API_URL='https://transcode.agi-so.fr'  # facultatif, c'est le defaut
+# Stocke dans ton shell ou ~/.bashrc:
+export TRANSCODE_API_AUTH="$CRED"
+unset CRED
+```
 
-# 3. Test que tout marche
-source ./transcode-api-client.sh
+Le credential est deja au format Basic Auth `user:password` direct.
+
+### Etape 2 — Source le wrapper bash
+
+```bash
+source <(curl -s https://transcode.agi-so.fr/transcode-api-client.sh)
+```
+
+### Etape 3 — Test
+
+```bash
 transcode_api_health
 # Devrait afficher 3 lignes (av1_nvenc, h264_nvenc, hevc_nvenc)
 ```
+
+Si tu vois les 3 encoders → tout marche. Tu peux passer a l'integration dans
+ton `reencode-tui.sh` (section ci-dessous).
+
+### En cas de probleme
+
+- Wrap rate (expire ou deja utilise) → demande a Rusmir d'en regenerer un
+- Wrap accepte mais credential ne marche pas (401) → Rusmir doit verifier
+  la coherence Vault/htpasswd (rotation possiblement incomplete)
+- Decentralise / pas envie de wrap: Rusmir peut creer un user Vault dedie
+  pour toi (userpass `damso` + policy `transcode-reader`) qui te donne acces
+  long terme sans dependance au wrap
 
 ## Test minimal
 
