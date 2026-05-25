@@ -19,11 +19,11 @@ services:
       TZ: Europe/Paris
       # NVENC GB10 = bloc materiel dedie, isole des SMs CUDA (vLLM ne partage pas).
       # Driver datacenter 580.x: pas de limite sessions consumer.
-      # 2 = optimal pour batch: pendant que job N encode, job N+1 finit son upload
-      # et fait son probe -> pipeline I/O+compute superpose, ~40% wall time gagne.
-      # >2: throughput NVENC pur sature, gain marginal + risque mem_limit:16g sur
-      # multi-cuvid buffers en parallele.
-      MAX_CONCURRENT_JOBS: "2"
+      # 3 = pipeline I/O+compute superpose + meilleure exploitation throughput NVENC.
+      # Sur batch 576p H.264, NVENC GB10 plafonne tres haut (~10k fps cumul) -> on
+      # est encore en-dessous de la capacite. mem_limit:16g tient (3 cuvid+scale_cuda
+      # ~9-12 GB sys). >3: risque OOM + queue NVENC throughput sature.
+      MAX_CONCURRENT_JOBS: "3"
       JOB_TTL_MINUTES: "60"
     ports:
       # Bind sur localhost uniquement - le waker proxy depuis .31:8000 vers 127.0.0.1:8001
