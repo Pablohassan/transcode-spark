@@ -152,38 +152,31 @@ encode_one() {
 }
 ```
 
-## ⚡ Parametre `PARALLEL` — UTILISE PARALLEL=2 (ou 4 si fibre 1 Gbps)
-
-**TL;DR**: utilise `PARALLEL=2` par defaut dans ton `reencode-tui.sh`. Si ta fibre fait bien
-1 Gbps a l'upload (Free Pop / 8K / similaire), tu peux monter a `PARALLEL=4` — test
-empirique 24/05 valide.
-
-### Pourquoi PARALLEL=2 et pas 1, pas 4
+## ⚡ Parametre `PARALLEL` — utilise PARALLEL=2 (ou 4 si fibre 1 Gbps)
 
 | Cote | Limite | Impact |
 |---|---|---|
-| **Toi (client)** | Fibre ~1 Gbps upload | PARALLEL=1 te limite a 460 Mbps (TLS Pi single-stream) = tu utilises **moitie** de ta bande passante |
-| **Pi nginx (reverse proxy)** | TLS 461 Mbps **par core**, 4 cores | PARALLEL=2 = 2 cores TLS = ~920 Mbps → exploite ta fibre. PARALLEL=4 ne gagne rien de plus car tu plafonnes a ta fibre |
-| **Spark (transcode)** | NVENC bloc unique = 1 job a la fois | PARALLEL>1 cote toi → les autres jobs **uploadent** pendant que le 1er **transcode**. Tu masques la latence reseau. |
-| **Sa: nginx queue** | FIFO, sans limite | Les jobs au-dela du 1er attendent en `queued` cote serveur, OK |
-
-Avec PARALLEL=2 sur 285 episodes 480p (~37 GB):
-- Upload + transcode + download cumule ≈ **15-20 min** au lieu de 35-40 min en PARALLEL=1
+| Toi (client) | Fibre ~1 Gbps upload | PARALLEL=1 limite a ~250 Mbps single-stream HTTP/1.1, tu sous-exploites ta fibre |
+| Pi nginx (reverse proxy) | TLS ~461 Mbps par core, 4 cores | PARALLEL=2 = 2 cores TLS en parallele = ~700-900 Mbps, PARALLEL=4 plafonne a ta fibre |
+| Spark (transcode) | NVENC 3 jobs concurrents max | PARALLEL>1 cote toi -> uploads simultanes masquent la latence reseau pendant les transcodes |
+| Serveur queue | FIFO, sans limite | Les jobs au-dela des 3 actifs attendent en queued, OK |
 
 ### Usage
 
 ```bash
-./reencode-tui.sh /media/torrents/Birdman/ /out 2 1 480
-#                                          ^ PARALLEL=2 (uploads concurrents - RECOMMANDE)
+./reencode-tui.sh /media/torrents/Birdman/ /out 4 1 480
+#                                          ^ PARALLEL=4 (recommande sur fibre 1+ Gbps)
 #                                            ^ THREADS=1 (pas utilise: c'est NVENC sur Spark)
 #                                              ^ TARGET_HEIGHT=480
 ```
 
-### PARALLEL=4 OK sur fibre 1 Gbps
+### Notes pratiques
 
-- PARALLEL=2 = default sain, marche partout
-- PARALLEL=4 = OK fibre 1 Gbps (mesure: 626 Mbps cumule, 4/4 streams OK)
-- Cold-start (>30 min idle) → 1 503 possible sur le 1er essai, retry suffit
+- Cold-start (>30 min idle): 1 503 possible sur le 1er essai, retry suffit
+- Le wrapper force HTTP/1.1 dans curl (`--http1.1`) pour eviter le piege HTTP/2:
+  multiplexing sur 1 connexion TCP + INITIAL_WINDOW_SIZE 64 KB cap le throughput
+  upload a ~55 Mbps/stream. HTTP/1.1 = 4 connexions distinctes = 4 cores TLS Pi
+  en parallele = ~175-250 Mbps/stream sur fibre 1+ Gbps.
 
 ## Parametres recommandes selon use case
 

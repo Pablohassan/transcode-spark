@@ -39,13 +39,16 @@ set -o pipefail
 : "${TRANSCODE_POLL_SECS:=2}"
 : "${TRANSCODE_MAX_WAIT:=7200}"
 
-# Internal: curl with auth
+# Internal: curl with auth. Force HTTP/1.1 pour eviter le piege HTTP/2:
+# multiplexing sur 1 connexion TCP + INITIAL_WINDOW_SIZE 64KB cap le throughput
+# upload a ~55 Mbps/stream (vs ~88 Mbps en HTTP/1.1 4 connexions distinctes,
+# mesure 2026-05-25: gain x7.8 sur upload concurrent).
 _transcode_curl() {
     if [[ -z "${TRANSCODE_API_AUTH:-}" ]]; then
         echo "transcode-api-client: TRANSCODE_API_AUTH not set (format: user:password)" >&2
         return 1
     fi
-    curl --silent --show-error -u "$TRANSCODE_API_AUTH" "$@"
+    curl --http1.1 --silent --show-error -u "$TRANSCODE_API_AUTH" "$@"
 }
 
 # Verifie que le service est joignable + retourne les codecs dispo

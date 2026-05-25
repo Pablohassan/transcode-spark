@@ -12,18 +12,12 @@
 - **Auth**: HTTP Basic Auth (`Authorization: Basic <base64(user:password)>`)
 - **Pattern**: async jobs avec polling
 - **Workflow**: `POST /jobs` (multipart upload) → poll `GET /jobs/{id}` → `GET /jobs/{id}/output` (stream download) → `DELETE /jobs/{id}` (cleanup)
-- **Limites**: 12 GB upload max, 7200s (2h) timeout, 1 job concurrent serveur (queue FIFO au-dela)
+- **Limites**: 12 GB upload max, 7200s (2h) timeout, 3 jobs concurrent serveur (queue FIFO au-dela)
 - **Performance**: ~100x realtime pour 480p H.264 NVENC (sur des sources de 60s+)
-- **⚡ Recommandation concurrence**: **utilisez 2 jobs HTTP en parallele cote client** (PARALLEL=2)
-  pour exploiter la bande passante upload de votre fibre. Le TLS Pi (reverse proxy) plafonne a
-  ~460 Mbps single-stream mais absorbe ~1200 Mbps en multi-stream grace a 4 workers nginx.
-  Voir section 10 et exemple `transcodeBatch` section 8.
-- **Architecture single-node (depuis 2026-05-25 rollback)**: 1 Spark A + MAX=3 +
-  PARALLEL=4 client = 3.28 OK/min sur batch 285 fichiers. Bottleneck = **NVENC GB10
-  d'UN chip sature a 96%** sur ce contenu (576p HEVC -> 480p H.264). Fibre Mac
-  pas saturee. Le code cluster A+B reste deploye mais inactif (Spark B standby). Le
-  cluster n'a pas donne 2x parce que le dispatcher actuel ne maintient pas B sustained
-  (bursts intermittents). Redesign dispatcher round-robin strict requis pour vrai gain.
+- **⚡ Recommandation concurrence**: **PARALLEL=2-4 cote client en HTTP/1.1** (pas HTTP/2).
+  HTTP/2 multiplexing + window flow control 64 KB cap le throughput upload a ~55 Mbps/stream.
+  HTTP/1.1 avec connexions distinctes utilise 4 cores TLS Pi en parallele (~175-250 Mbps/stream).
+  Si curl: ajouter `--http1.1`. Si Node fetch/axios: HTTP/1.1 par defaut OK.
 
 ## 1. Authentification
 
