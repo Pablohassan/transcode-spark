@@ -18,10 +18,10 @@
   pour exploiter la bande passante upload de votre fibre. Le TLS Pi (reverse proxy) plafonne a
   ~460 Mbps single-stream mais absorbe ~1200 Mbps en multi-stream grace a 4 workers nginx.
   Voir section 10 et exemple `transcodeBatch` section 8.
-- **Cluster 2-noeuds (depuis 2026-05-25)**: le service est servi par 2 DGX Spark (A+B) en
-  cluster transparent. L'orchestrator (Spark A) dispatche automatiquement les jobs entre les
-  2 NVENC blocs (capacite cluster: 6 jobs running). Cote client: **aucune modif**, meme URL,
-  meme credential, meme API. Pour exploiter pleinement: PARALLEL=4-6 sur batchs > 5 fichiers.
+- **Architecture single-node (depuis 2026-05-25 rollback)**: 1 Spark A + MAX=3 +
+  PARALLEL=4 client = sweet spot mesure 3.28 OK/min sur batch 285 fichiers. Bottleneck =
+  upload client (fibre + TLS Pi), pas NVENC. Le code cluster A+B reste deploye mais inactif
+  (Spark B en standby). Reactivable plus tard si multi-client (Damso parallele).
 
 ## 1. Authentification
 

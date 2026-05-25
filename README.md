@@ -1,42 +1,33 @@
 # transcode-service
 
 Service de transcodage video on-demand exploitant le hardware NVENC 9eme generation
-(Blackwell) sur cluster DGX Spark A (.31) + B (.59).
+(Blackwell) sur DGX Spark A (.31).
 
-## Architecture (cluster 2-noeuds)
+## Architecture (single node)
 
 ```
 Internet --HTTPS--> Freebox --DNAT 443--> VIP .200 -> Pi nginx .60
                                                               |
                                                               v HTTP plain LAN
-                                              Spark A .31:8000 (orchestrator)
+                                              Spark A .31:8000
                                               transcode-waker (Bun+Hono)
-                                              dispatch logic + scale-to-zero
-                                              ├──> http://127.0.0.1:8001 (container A)
-                                              │      NVENC GB10 #A
-                                              │
-                                              └──> http://10.0.0.2:8000 (waker B)
-                                                     via lien direct ConnectX-7 200 Gbps
-                                                     mesure 110 Gbit/s iperf3
+                                              scale-to-zero (idle 30 min)
                                                               |
-                                                              v
-                                                Spark B .59:8000 (worker)
-                                                ├──> http://127.0.0.1:8001 (container B)
-                                                       NVENC GB10 #B
+                                                              v http://127.0.0.1:8001
+                                              container ffmpeg
+                                              NVENC GB10 (Blackwell)
+                                              MAX_CONCURRENT_JOBS=3
 ```
 
-**Dispatch logic** (orchestrator sur Spark A) :
-- POST /jobs:
-  - Compteur `postsReceived` cumulé depuis le dernier idle réel du cluster
-  - `postsReceived < BATCH_THRESHOLD` (default 6) → **mode single**, tout sur A (B reste idle, scale-to-zero possible)
-  - `postsReceived >= 6` → **mode batch**, least-loaded entre A et B (tie-break A)
-  - Reset auto du compteur quand cluster vraiment idle: >30s sans POST + 0 pending + 0 jobs running sur A ET B (interrogation réelle des backends, pas un compteur local)
-- GET/DELETE /jobs/{id}, GET /jobs/{id}/output: route par mapping jobId -> backend (RAM)
-- GET /jobs: agregation A + B (tries par createdAt desc)
-- Failure: si Spark B down (poll 30s), fallback automatique tout sur A
+**Sweet spot empirique (Maries deux enfants batch 285 fichiers 2026-05-25)** :
+- 1 Spark + MAX=3 + PARALLEL=4 client = **3.28 OK/min**
+- Le bottleneck = upload client (fibre Mac + TLS Pi single-core), pas NVENC GB10
+- Test cluster 2-Sparks: aucun gain net pour un single client uploader (lien interne
+  200 Gbps n'est pas dans le chemin d'upload). Cluster en rollback.
 
-Capacite cluster: **6 jobs running simultanes** (3 par Spark). Transparent cote client.
-Pour batch > 5 fichiers: PARALLEL=4 client → mode batch s'active au 6e POST → B s'active → distribution équilibrée sur le reste du batch.
+**Spark B (.59)** : déployé mais inactif (waker stoppé, container down). Code
+orchestrator/worker prêt si futur use case multi-client (Damso + toi en parallèle).
+Voir `waker/systemd-orchestrator.conf` pour réactiver (un seul cp + restart waker A).
 
 ## Composants
 
