@@ -39,21 +39,16 @@ let backendBHealthy = false
 let pendingDispatchA = 0
 let pendingDispatchB = 0
 
-// Seuil d'activation cluster: a partir du Nieme POST cumule, mode batch active.
-// Reset uniquement quand le cluster est REELLEMENT idle (jobs running backends = 0
-// ET 0 pending ET 30s sans POST). N'utilise PAS activeJobs local qui revient a 0
-// entre les POSTs avec PARALLEL=4 -> reset premature -> bug observe 2026-05-25.
-const BATCH_THRESHOLD = Number(process.env.BATCH_THRESHOLD ?? '6')
+// Round-robin strict: alterne A/B chaque POST sans seuil ni mode. Test 2026-05-25
+// pour valider gain reel cluster vs single Spark. Garde compteur postsReceived
+// juste pour metric/log.
 let postsReceived = 0
 let lastPostAt = 0
+let lastChoice: 'A' | 'B' = 'B' // initialise sur B pour que le 1er POST aille sur A
 
 function trackPost(): void {
   postsReceived++
   lastPostAt = Date.now()
-}
-
-function isBatchMode(): boolean {
-  return postsReceived >= BATCH_THRESHOLD
 }
 
 // -- Helpers --------------------------------------------------------
@@ -134,15 +129,11 @@ async function countRunningOn(url: string): Promise<number> {
   }
 }
 
-function chooseBackend(aRunning: number, bRunning: number): 'A' | 'B' {
+function chooseBackend(_aRunning: number, _bRunning: number): 'A' | 'B' {
+  // Round-robin strict: alterne A/B inconditionnellement. Si B down -> tout A.
   if (!backendBHealthy) return 'A'
-  // Mode single (postsReceived < 6): tout sur A, B reste idle.
-  if (!isBatchMode()) return 'A'
-  // Mode batch (>= 6 POSTs cumules depuis dernier idle reel): least-loaded.
-  const aLoad = aRunning + pendingDispatchA
-  const bLoad = bRunning + pendingDispatchB
-  if (aLoad <= bLoad) return 'A'
-  return 'B'
+  lastChoice = lastChoice === 'A' ? 'B' : 'A'
+  return lastChoice
 }
 
 function backendUrl(name: 'A' | 'B'): string {
@@ -210,10 +201,10 @@ app.get('/waker/status', async (c) => {
     },
     totalRunning: aRunning + bRunning,
     jobMappings: jobBackends.size,
-    batchMode: {
-      active: isBatchMode(),
+    dispatch: {
+      algorithm: 'round-robin',
       postsReceived,
-      threshold: BATCH_THRESHOLD,
+      lastChoice,
       lastPostAt: lastPostAt ? new Date(lastPostAt).toISOString() : null,
     },
   })
@@ -245,8 +236,7 @@ if (IS_ORCHESTRATOR) {
         const job = JSON.parse(text) as { id?: string }
         if (job.id) {
           jobBackends.set(job.id, choice)
-          const mode = isBatchMode() ? 'batch' : 'single'
-          console.log(`[dispatch] job ${job.id} -> ${choice} (A:${aRunning + pendingDispatchA}/B:${bRunning + pendingDispatchB}, mode:${mode}, posts:${postsReceived})`)
+          console.log(`[dispatch] job ${job.id} -> ${choice} (rr, A:${aRunning + pendingDispatchA}/B:${bRunning + pendingDispatchB}, posts:${postsReceived})`)
         }
       } catch {
         // ignore parse: pas un JSON, ou error response
@@ -373,7 +363,7 @@ console.log(`  backend: ${BACKEND_URL}`)
 if (IS_ORCHESTRATOR) {
   console.log(`  backend_b: ${BACKEND_B_URL}`)
   console.log(`  max_running_local: ${MAX_RUNNING_LOCAL}`)
-  console.log(`  batch_threshold: ${BATCH_THRESHOLD} POSTs cumules (reset sur idle backends reel)`)
+  console.log(`  dispatch: round-robin strict A<->B (test sustained 2 chips NVENC)`)
 }
 console.log(`  compose_dir: ${COMPOSE_DIR}`)
 console.log(`  idle_timeout: ${IDLE_TIMEOUT_MIN} min`)
