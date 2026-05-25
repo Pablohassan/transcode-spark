@@ -21,12 +21,20 @@ Internet --HTTPS--> Freebox --DNAT 443--> VIP .200 -> Pi nginx .60
 
 **Sweet spot empirique (Maries deux enfants batch 285 fichiers 2026-05-25)** :
 - 1 Spark + MAX=3 + PARALLEL=4 client = **3.28 OK/min**
-- Le bottleneck = upload client (fibre Mac + TLS Pi single-core), pas NVENC GB10
-- Test cluster 2-Sparks: aucun gain net pour un single client uploader (lien interne
-  200 Gbps n'est pas dans le chemin d'upload). Cluster en rollback.
+- Bottleneck = **NVENC GB10 d'UN chip saturé à 96%** sur ce contenu (576p HEVC -> 480p H.264)
+- Fibre Mac upload ~860 Mbps max, pic observe ~500-600 Mbps = **PAS saturee** (la bande
+  passante n'est pas le facteur limitant)
+
+**Test cluster 2-Sparks: aucun gain net mesure** (test v6: 2.32 OK/min vs 3.28 single).
+La raison N'EST PAS l'upload (la fibre Mac n'est pas saturee) mais le **dispatcher
+qui n'arrive pas a maintenir Spark B sustained** : B s'active en bursts intermittents
+de ~40s puis retombe a 0 parce que le compteur postsReceived oscille autour du seuil.
+Pour vraiment exploiter 2 chips, il faudrait un round-robin strict A<->B sans seuil ni
+mode (chaque POST alterne A/B). Architecture cluster en rollback en attendant un redesign
+du dispatcher.
 
 **Spark B (.59)** : déployé mais inactif (waker stoppé, container down). Code
-orchestrator/worker prêt si futur use case multi-client (Damso + toi en parallèle).
+orchestrator/worker prêt si futur use case (round-robin strict, multi-client).
 Voir `waker/systemd-orchestrator.conf` pour réactiver (un seul cp + restart waker A).
 
 ## Composants

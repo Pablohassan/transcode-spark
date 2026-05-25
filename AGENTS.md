@@ -19,9 +19,11 @@
   ~460 Mbps single-stream mais absorbe ~1200 Mbps en multi-stream grace a 4 workers nginx.
   Voir section 10 et exemple `transcodeBatch` section 8.
 - **Architecture single-node (depuis 2026-05-25 rollback)**: 1 Spark A + MAX=3 +
-  PARALLEL=4 client = sweet spot mesure 3.28 OK/min sur batch 285 fichiers. Bottleneck =
-  upload client (fibre + TLS Pi), pas NVENC. Le code cluster A+B reste deploye mais inactif
-  (Spark B en standby). Reactivable plus tard si multi-client (Damso parallele).
+  PARALLEL=4 client = 3.28 OK/min sur batch 285 fichiers. Bottleneck = **NVENC GB10
+  d'UN chip sature a 96%** sur ce contenu (576p HEVC -> 480p H.264). Fibre Mac
+  pas saturee. Le code cluster A+B reste deploye mais inactif (Spark B standby). Le
+  cluster n'a pas donne 2x parce que le dispatcher actuel ne maintient pas B sustained
+  (bursts intermittents). Redesign dispatcher round-robin strict requis pour vrai gain.
 
 ## 1. Authentification
 
