@@ -17,13 +17,12 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
       TZ: Europe/Paris
-      # NVENC GB10 = bloc materiel dedie, isole des SMs CUDA (vLLM ne partage pas).
-      # Driver datacenter 580.x: pas de limite sessions consumer.
-      # 3 = pipeline I/O+compute superpose + meilleure exploitation throughput NVENC.
-      # Sur batch 576p H.264, NVENC GB10 plafonne tres haut (~10k fps cumul) -> on
-      # est encore en-dessous de la capacite. mem_limit:16g tient (3 cuvid+scale_cuda
-      # ~9-12 GB sys). >3: risque OOM + queue NVENC throughput sature.
-      MAX_CONCURRENT_JOBS: "3"
+      # NVENC GB10 Blackwell datacenter: bloc encoder isole des SMs CUDA + driver
+      # sans limite sessions. 4 sessions cuvid+scale_cuda+nvenc = ~12-16 GB sys
+      # (bumper mem_limit a 32g pour garder marge). 4 par Spark x 2 Sparks = 8 slots
+      # cluster. Permet de saturer le throughput du chip (pas juste le %utilization
+      # par session). Au-dela de 4: NVENC reel sature, gain marginal + risque OOM.
+      MAX_CONCURRENT_JOBS: "4"
       JOB_TTL_MINUTES: "60"
     ports:
       # Bind sur localhost uniquement - le waker proxy depuis .31:8000 vers 127.0.0.1:8001
@@ -40,7 +39,7 @@ services:
               capabilities: [gpu, video]
     # Limites pour eviter de saturer le Spark si runaway
     cpus: "8"
-    mem_limit: 16g
+    mem_limit: 32g
     # Healthcheck propre
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8001/health"]
