@@ -19,23 +19,43 @@ Internet --HTTPS--> Freebox --DNAT 443--> VIP .200 -> Pi nginx .60
                                               MAX_CONCURRENT_JOBS=3
 ```
 
-**Sweet spot empirique (Maries deux enfants batch 285 fichiers 2026-05-25)** :
-- 1 Spark + MAX=3 + PARALLEL=4 client = **3.28 OK/min**
-- Bottleneck = **NVENC GB10 d'UN chip saturé à 96%** sur ce contenu (576p HEVC -> 480p H.264)
-- Fibre Mac upload ~860 Mbps max, pic observe ~500-600 Mbps = **PAS saturee** (la bande
-  passante n'est pas le facteur limitant)
+**Sweet spot empirique (validation batch Maries deux enfants 2026-05-25)** :
+- 1 Spark + MAX=3 + PARALLEL=4 client = **3.28-3.42 OK/min** sur 576p PAL -> H.264 480p
+- Upload moyen 13 s/fichier (apres fix concurrence pipeline)
+- Wall median 60 s/fichier (upload + transcode + download couples HTTP)
+- Bottleneck = **NVENC GB10 d'UN chip sature a 96%** sur ce contenu
+- Fibre Mac upload ~860 Mbps max, pic observe ~600 Mbps = **PAS saturee**
 
-**Test cluster 2-Sparks: aucun gain net mesure** (test v6: 2.32 OK/min vs 3.28 single).
-La raison N'EST PAS l'upload (la fibre Mac n'est pas saturee) mais le **dispatcher
-qui n'arrive pas a maintenir Spark B sustained** : B s'active en bursts intermittents
-de ~40s puis retombe a 0 parce que le compteur postsReceived oscille autour du seuil.
-Pour vraiment exploiter 2 chips, il faudrait un round-robin strict A<->B sans seuil ni
-mode (chaque POST alterne A/B). Architecture cluster en rollback en attendant un redesign
-du dispatcher.
+**Test cluster 2-Sparks (v9 ETA-based, mesure complete avec monitoring NVENC live)** :
 
-**Spark B (.59)** : déployé mais inactif (waker stoppé, container down). Code
-orchestrator/worker prêt si futur use case (round-robin strict, multi-client).
-Voir `waker/systemd-orchestrator.conf` pour réactiver (un seul cp + restart waker A).
+| Indicateur | 1 Spark sweet spot | Cluster ETA | Delta |
+|---|---|---|---|
+| Throughput | 3.28 OK/min | 3.42 OK/min | +4.3 % |
+| Wall 20 fichiers | 6m20s | 5m33s | -12 % |
+| Upload moyen/fichier | 38 s (avant fixes) | 13 s | -66 % |
+| NVENC A+B sustained >=85% simultane | n/a | **1 %** du temps mesure | tres faible |
+
+**Pourquoi seulement +4 %** : le pipeline HTTP synchrone `upload -> ffprobe ->
+transcode -> download` couple les phases. A.NVENC se libere plus vite que le
+client n'envoie le suivant -> A reprend la priorite -> B perd sa charge. Les
+2 chips NVENC ne sont saturees simultanement que 1 % du temps mesure (vs
+~50 % theorique pour vrai 2x). Le gain reel observe vient surtout des fixes
+collateraux pipeline (HTTP/1.1 implicite Node, maxRequestBodySize 12 GB,
+rate limit 600 r/m burst 50), pas du deuxieme NVENC.
+
+**Pour atteindre vrai 2x** : refonte API async (endpoints /batches + workers
+picking depuis queue interne sans coupling au upload client). Non implemente,
+~6-8h dev. Code cluster reste deploye pour reactivation future.
+
+**Spark B (.59)** : container stop, waker B up idle (~20 MB RAM, scale-to-zero
+NVENC). Reactivation cluster = 3 etapes :
+1. `docker compose up -d` sur Spark B
+2. `sudo cp /home/pablo/transcode-waker/systemd-orchestrator.conf /etc/systemd/system/transcode-waker.service.d/`
+3. `sudo systemctl daemon-reload && sudo systemctl restart transcode-waker` sur Spark A
+
+Utile uniquement si **multi-client uploader** (ex: Damso depuis sa propre fibre
+en parallele de toi) : 2 fibres = 2x bandwidth ingress -> les 2 chips NVENC
+vraiment sollicitees simultanement.
 
 ## Composants
 

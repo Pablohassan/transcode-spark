@@ -39,16 +39,50 @@ let backendBHealthy = false
 let pendingDispatchA = 0
 let pendingDispatchB = 0
 
-// Round-robin strict: alterne A/B chaque POST sans seuil ni mode. Test 2026-05-25
-// pour valider gain reel cluster vs single Spark. Garde compteur postsReceived
-// juste pour metric/log.
+// Phase 1 (analyse GPT 2026-05-25): mode cluster active si batch detecte
+// (>= BATCH_THRESHOLD POSTs cumules depuis dernier idle reel). En mode cluster,
+// scheduler ETA-based: assign job au node avec la plus basse ETA, tie-break A.
+const BATCH_THRESHOLD = Number(process.env.BATCH_THRESHOLD ?? '3')
+const SPILL_MARGIN_S = Number(process.env.SPILL_MARGIN_S ?? '5')
+const TRANSFER_PENALTY_B_S = Number(process.env.TRANSFER_PENALTY_B_S ?? '1')
+const AVG_ENCODE_S = Number(process.env.AVG_ENCODE_S ?? '50')
+
 let postsReceived = 0
 let lastPostAt = 0
-let lastChoice: 'A' | 'B' = 'B' // initialise sur B pour que le 1er POST aille sur A
+
+// Log dispatch + timestamps detailled pour analyse post-batch
+interface DispatchLog {
+  backend: 'A' | 'B'
+  assignedAt: number
+  postReceivedAt: number
+  etaA: number
+  etaB: number
+}
+const dispatchLogs = new Map<string, DispatchLog>()
 
 function trackPost(): void {
   postsReceived++
   lastPostAt = Date.now()
+}
+
+function isBatchMode(): boolean {
+  return postsReceived >= BATCH_THRESHOLD
+}
+
+// ETA approximative: (slots busy / max) * avg_encode + transfer_penalty(B uniquement).
+// active = jobs en running + queued reels backends + pending dispatch du waker.
+function etaForNode(
+  node: 'A' | 'B',
+  running: number,
+  queued: number,
+  pending: number,
+  max: number,
+): number {
+  const slotsBusy = running + queued + pending
+  const wavesAhead = Math.ceil(slotsBusy / Math.max(1, max))
+  let eta = wavesAhead * AVG_ENCODE_S
+  if (node === 'B') eta += TRANSFER_PENALTY_B_S
+  return eta
 }
 
 // -- Helpers --------------------------------------------------------
@@ -72,7 +106,26 @@ async function checkBackendBHealth(): Promise<boolean> {
   }
 }
 
+// Mutex: si startContainer est deja en cours, les nouveaux appels attendent
+// la meme promise (evite la cascade N x docker compose up en parallele -> SIGABRT).
+let containerStartPromise: Promise<boolean> | null = null
+
 async function startContainer(): Promise<boolean> {
+  if (containerStartPromise) return containerStartPromise
+  containerStartPromise = doStartContainer()
+  try {
+    return await containerStartPromise
+  } finally {
+    containerStartPromise = null
+  }
+}
+
+async function doStartContainer(): Promise<boolean> {
+  // Double-check: si l'app a deja recover entre les appels concurrents, skip
+  if (await isBackendHealthy()) {
+    containerState = 'up'
+    return true
+  }
   console.log('[waker] starting container...')
   const t0 = Date.now()
   const proc = Bun.spawn(['docker', 'compose', 'up', '-d'], {
@@ -111,29 +164,49 @@ async function stopContainer(): Promise<void> {
   containerState = 'down'
 }
 
-// Cache running count per backend (TTL 1s pour eviter rafale de fetches sur dispatch parallels)
-const runningCache = new Map<string, { running: number; ts: number }>()
+// Cache running + queued count per backend (TTL 1s)
+interface BackendLoad { running: number; queued: number; ts: number }
+const loadCache = new Map<string, BackendLoad>()
 
-async function countRunningOn(url: string): Promise<number> {
-  const cached = runningCache.get(url)
-  if (cached && Date.now() - cached.ts < 1000) return cached.running
+async function getBackendLoad(url: string): Promise<{ running: number; queued: number }> {
+  const cached = loadCache.get(url)
+  if (cached && Date.now() - cached.ts < 1000) return { running: cached.running, queued: cached.queued }
   try {
     const res = await fetch(`${url}/jobs`, { signal: AbortSignal.timeout(2000) })
-    if (!res.ok) return cached?.running ?? 0
+    if (!res.ok) return { running: cached?.running ?? 0, queued: cached?.queued ?? 0 }
     const data = (await res.json()) as { jobs?: Array<{ status: string }> }
-    const running = (data.jobs ?? []).filter((j) => j.status === 'running').length
-    runningCache.set(url, { running, ts: Date.now() })
-    return running
+    const jobs = data.jobs ?? []
+    const running = jobs.filter((j) => j.status === 'running').length
+    const queued = jobs.filter((j) => j.status === 'queued').length
+    loadCache.set(url, { running, queued, ts: Date.now() })
+    return { running, queued }
   } catch {
-    return cached?.running ?? 0
+    return { running: cached?.running ?? 0, queued: cached?.queued ?? 0 }
   }
 }
 
-function chooseBackend(_aRunning: number, _bRunning: number): 'A' | 'B' {
-  // Round-robin strict: alterne A/B inconditionnellement. Si B down -> tout A.
-  if (!backendBHealthy) return 'A'
-  lastChoice = lastChoice === 'A' ? 'B' : 'A'
-  return lastChoice
+// Compat helper utilise dans le idle check
+async function countRunningOn(url: string): Promise<number> {
+  return (await getBackendLoad(url)).running
+}
+
+function chooseBackend(
+  aRunning: number,
+  bRunning: number,
+  aQueued: number,
+  bQueued: number,
+): { backend: 'A' | 'B'; etaA: number; etaB: number } {
+  if (!backendBHealthy) {
+    const etaA = etaForNode('A', aRunning, aQueued, pendingDispatchA, MAX_RUNNING_LOCAL)
+    return { backend: 'A', etaA, etaB: Infinity }
+  }
+  // Mode single (postsReceived < BATCH_THRESHOLD): tout sur A, B reste idle.
+  const etaA = etaForNode('A', aRunning, aQueued, pendingDispatchA, MAX_RUNNING_LOCAL)
+  const etaB = etaForNode('B', bRunning, bQueued, pendingDispatchB, MAX_RUNNING_LOCAL)
+  if (!isBatchMode()) return { backend: 'A', etaA, etaB }
+  // Mode cluster: ETA-based, tie-break A avec SPILL_MARGIN.
+  if (etaB + SPILL_MARGIN_S < etaA) return { backend: 'B', etaA, etaB }
+  return { backend: 'A', etaA, etaB }
 }
 
 function backendUrl(name: 'A' | 'B'): string {
@@ -202,28 +275,51 @@ app.get('/waker/status', async (c) => {
     totalRunning: aRunning + bRunning,
     jobMappings: jobBackends.size,
     dispatch: {
-      algorithm: 'round-robin',
+      algorithm: 'ETA-based + batch threshold',
+      mode: isBatchMode() ? 'batch' : 'single',
       postsReceived,
-      lastChoice,
+      threshold: BATCH_THRESHOLD,
+      avgEncodeS: AVG_ENCODE_S,
+      spillMarginS: SPILL_MARGIN_S,
       lastPostAt: lastPostAt ? new Date(lastPostAt).toISOString() : null,
+      dispatchLogsSize: dispatchLogs.size,
     },
   })
+})
+
+// Endpoint d'analyse post-batch: tous les dispatch logs avec timestamps
+app.get('/waker/dispatch-logs', (c) => {
+  if (!IS_ORCHESTRATOR) return c.json({ logs: [] })
+  const logs = Array.from(dispatchLogs.entries()).map(([jobId, log]) => ({
+    jobId,
+    backend: log.backend,
+    postReceivedAt: new Date(log.postReceivedAt).toISOString(),
+    assignedAt: new Date(log.assignedAt).toISOString(),
+    uploadDurationMs: log.assignedAt - log.postReceivedAt,
+    etaAtDispatchA: log.etaA,
+    etaAtDispatchB: log.etaB,
+  }))
+  return c.json({ count: logs.length, logs })
 })
 
 // -- Orchestrator routes (si BACKEND_B_URL defini) ------------------
 
 if (IS_ORCHESTRATOR) {
-  // POST /jobs: choisit le backend selon charge, capture jobId, store mapping
+  // POST /jobs: ETA-based scheduler. Stocke mapping + log timestamps detailled.
   app.post('/jobs', async (c) => {
-    lastActivity = Date.now()
-    trackPost() // tracker pour basculer en mode batch au-dela de BATCH_THRESHOLD
+    const postReceivedAt = Date.now()
+    lastActivity = postReceivedAt
+    trackPost()
     if (!(await isBackendHealthy())) {
       const ok = await startContainer()
       if (!ok) return c.json({ error: 'backend_unavailable' }, 503)
     }
-    const aRunning = await countRunningOn(BACKEND_URL)
-    const bRunning = backendBHealthy ? await countRunningOn(BACKEND_B_URL!) : 0
-    const choice = chooseBackend(aRunning, bRunning)
+    const loadA = await getBackendLoad(BACKEND_URL)
+    const loadB = backendBHealthy ? await getBackendLoad(BACKEND_B_URL!) : { running: 0, queued: 0 }
+    const { backend: choice, etaA, etaB } = chooseBackend(
+      loadA.running, loadB.running, loadA.queued, loadB.queued,
+    )
+    const mode = isBatchMode() ? 'batch' : 'single'
 
     activeJobs++
     if (choice === 'A') pendingDispatchA++
@@ -235,12 +331,18 @@ if (IS_ORCHESTRATOR) {
       try {
         const job = JSON.parse(text) as { id?: string }
         if (job.id) {
+          const assignedAt = Date.now()
           jobBackends.set(job.id, choice)
-          console.log(`[dispatch] job ${job.id} -> ${choice} (rr, A:${aRunning + pendingDispatchA}/B:${bRunning + pendingDispatchB}, posts:${postsReceived})`)
+          dispatchLogs.set(job.id, { backend: choice, assignedAt, postReceivedAt, etaA, etaB })
+          console.log(
+            `[dispatch] job ${job.id} -> ${choice} (mode:${mode}, posts:${postsReceived}, ` +
+            `loadA:${loadA.running}r${loadA.queued}q+${pendingDispatchA}p, ` +
+            `loadB:${loadB.running}r${loadB.queued}q+${pendingDispatchB}p, ` +
+            `ETA: A=${etaA.toFixed(0)}s B=${etaB.toFixed(0)}s, ` +
+            `upload:${assignedAt - postReceivedAt}ms)`
+          )
         }
-      } catch {
-        // ignore parse: pas un JSON, ou error response
-      }
+      } catch {/* ignore non-JSON */}
       return new Response(text, {
         status: res.status,
         statusText: res.statusText,
@@ -321,9 +423,19 @@ setInterval(async () => {
   }
 }, 60_000)
 
-// Backend B health poll + batch counter reset (orchestrator only)
-if (IS_ORCHESTRATOR) {
-  setInterval(async () => {
+// Periodic health poll (LOCAL A + remote B si orchestrator) + batch counter reset
+setInterval(async () => {
+  // Refresh local container state (evite croyance stale apres incident)
+  const aHealthy = await isBackendHealthy()
+  if (aHealthy && containerState !== 'up') {
+    console.log(`[waker] backend A recovered: ${containerState} -> up`)
+    containerState = 'up'
+  } else if (!aHealthy && containerState === 'up') {
+    console.log(`[waker] backend A lost: up -> down`)
+    containerState = 'down'
+  }
+
+  if (IS_ORCHESTRATOR) {
     const newHealth = await checkBackendBHealth()
     if (newHealth !== backendBHealthy) {
       console.log(`[cluster] backend B ${newHealth ? 'recovered' : 'down'}`)
@@ -351,8 +463,8 @@ if (IS_ORCHESTRATOR) {
         postsReceived = 0
       }
     }
-  }, 10_000)
-}
+  }
+}, 10_000)
 
 // -- Startup --------------------------------------------------------
 
@@ -363,7 +475,7 @@ console.log(`  backend: ${BACKEND_URL}`)
 if (IS_ORCHESTRATOR) {
   console.log(`  backend_b: ${BACKEND_B_URL}`)
   console.log(`  max_running_local: ${MAX_RUNNING_LOCAL}`)
-  console.log(`  dispatch: round-robin strict A<->B (test sustained 2 chips NVENC)`)
+  console.log(`  dispatch: ETA-based, batch threshold=${BATCH_THRESHOLD} POSTs, spill_margin=${SPILL_MARGIN_S}s, avg_encode=${AVG_ENCODE_S}s`)
 }
 console.log(`  compose_dir: ${COMPOSE_DIR}`)
 console.log(`  idle_timeout: ${IDLE_TIMEOUT_MIN} min`)
