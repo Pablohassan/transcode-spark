@@ -26,12 +26,17 @@ Internet --HTTPS--> Freebox --DNAT 443--> VIP .200 -> Pi nginx .60
 ```
 
 **Dispatch logic** (orchestrator sur Spark A) :
-- POST /jobs: si Spark A < MAX_RUNNING_LOCAL (default 3) -> local, sinon -> Spark B
+- POST /jobs:
+  - Compteur `postsReceived` cumulé depuis le dernier idle réel du cluster
+  - `postsReceived < BATCH_THRESHOLD` (default 6) → **mode single**, tout sur A (B reste idle, scale-to-zero possible)
+  - `postsReceived >= 6` → **mode batch**, least-loaded entre A et B (tie-break A)
+  - Reset auto du compteur quand cluster vraiment idle: >30s sans POST + 0 pending + 0 jobs running sur A ET B (interrogation réelle des backends, pas un compteur local)
 - GET/DELETE /jobs/{id}, GET /jobs/{id}/output: route par mapping jobId -> backend (RAM)
-- GET /jobs: agregation A + B
+- GET /jobs: agregation A + B (tries par createdAt desc)
 - Failure: si Spark B down (poll 30s), fallback automatique tout sur A
 
 Capacite cluster: **6 jobs running simultanes** (3 par Spark). Transparent cote client.
+Pour batch > 5 fichiers: PARALLEL=4 client → mode batch s'active au 6e POST → B s'active → distribution équilibrée sur le reste du batch.
 
 ## Composants
 

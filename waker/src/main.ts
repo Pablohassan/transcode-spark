@@ -39,6 +39,23 @@ let backendBHealthy = false
 let pendingDispatchA = 0
 let pendingDispatchB = 0
 
+// Seuil d'activation cluster: a partir du Nieme POST cumule, mode batch active.
+// Reset uniquement quand le cluster est REELLEMENT idle (jobs running backends = 0
+// ET 0 pending ET 30s sans POST). N'utilise PAS activeJobs local qui revient a 0
+// entre les POSTs avec PARALLEL=4 -> reset premature -> bug observe 2026-05-25.
+const BATCH_THRESHOLD = Number(process.env.BATCH_THRESHOLD ?? '6')
+let postsReceived = 0
+let lastPostAt = 0
+
+function trackPost(): void {
+  postsReceived++
+  lastPostAt = Date.now()
+}
+
+function isBatchMode(): boolean {
+  return postsReceived >= BATCH_THRESHOLD
+}
+
 // -- Helpers --------------------------------------------------------
 
 async function isBackendHealthy(): Promise<boolean> {
@@ -118,12 +135,14 @@ async function countRunningOn(url: string): Promise<number> {
 }
 
 function chooseBackend(aRunning: number, bRunning: number): 'A' | 'B' {
+  if (!backendBHealthy) return 'A'
+  // Mode single (postsReceived < 6): tout sur A, B reste idle.
+  if (!isBatchMode()) return 'A'
+  // Mode batch (>= 6 POSTs cumules depuis dernier idle reel): least-loaded.
   const aLoad = aRunning + pendingDispatchA
   const bLoad = bRunning + pendingDispatchB
-  if (aLoad < MAX_RUNNING_LOCAL) return 'A'
-  if (!backendBHealthy) return 'A' // fallback A si B down (queue cote A)
-  if (bLoad < MAX_RUNNING_LOCAL) return 'B'
-  return 'A'
+  if (aLoad <= bLoad) return 'A'
+  return 'B'
 }
 
 function backendUrl(name: 'A' | 'B'): string {
@@ -191,6 +210,12 @@ app.get('/waker/status', async (c) => {
     },
     totalRunning: aRunning + bRunning,
     jobMappings: jobBackends.size,
+    batchMode: {
+      active: isBatchMode(),
+      postsReceived,
+      threshold: BATCH_THRESHOLD,
+      lastPostAt: lastPostAt ? new Date(lastPostAt).toISOString() : null,
+    },
   })
 })
 
@@ -200,6 +225,7 @@ if (IS_ORCHESTRATOR) {
   // POST /jobs: choisit le backend selon charge, capture jobId, store mapping
   app.post('/jobs', async (c) => {
     lastActivity = Date.now()
+    trackPost() // tracker pour basculer en mode batch au-dela de BATCH_THRESHOLD
     if (!(await isBackendHealthy())) {
       const ok = await startContainer()
       if (!ok) return c.json({ error: 'backend_unavailable' }, 503)
@@ -219,7 +245,8 @@ if (IS_ORCHESTRATOR) {
         const job = JSON.parse(text) as { id?: string }
         if (job.id) {
           jobBackends.set(job.id, choice)
-          console.log(`[dispatch] job ${job.id} -> ${choice} (A:${aRunning + pendingDispatchA}/B:${bRunning + pendingDispatchB})`)
+          const mode = isBatchMode() ? 'batch' : 'single'
+          console.log(`[dispatch] job ${job.id} -> ${choice} (A:${aRunning + pendingDispatchA}/B:${bRunning + pendingDispatchB}, mode:${mode}, posts:${postsReceived})`)
         }
       } catch {
         // ignore parse: pas un JSON, ou error response
@@ -304,7 +331,7 @@ setInterval(async () => {
   }
 }, 60_000)
 
-// Backend B health poll (orchestrator only)
+// Backend B health poll + batch counter reset (orchestrator only)
 if (IS_ORCHESTRATOR) {
   setInterval(async () => {
     const newHealth = await checkBackendBHealth()
@@ -312,7 +339,29 @@ if (IS_ORCHESTRATOR) {
       console.log(`[cluster] backend B ${newHealth ? 'recovered' : 'down'}`)
       backendBHealthy = newHealth
     }
-  }, 30_000)
+    // Reset compteur batch quand cluster VRAIMENT idle. Critere = jobs running
+    // reels sur les backends (pas activeJobs local qui revient a 0 entre POSTs
+    // avec PARALLEL=4 -> reset premature). Conditions cumulees:
+    //  - >30s sans nouveau POST
+    //  - 0 pending dispatch
+    //  - 0 jobs running sur backend A
+    //  - 0 jobs running sur backend B
+    const idleMs = Date.now() - lastPostAt
+    if (
+      lastPostAt > 0 &&
+      idleMs > 30_000 &&
+      pendingDispatchA === 0 &&
+      pendingDispatchB === 0 &&
+      postsReceived > 0
+    ) {
+      const aRunning = await countRunningOn(BACKEND_URL)
+      const bRunning = backendBHealthy ? await countRunningOn(BACKEND_B_URL!) : 0
+      if (aRunning === 0 && bRunning === 0) {
+        console.log(`[batch] cluster truly idle ${Math.round(idleMs / 1000)}s -> reset counter (was ${postsReceived})`)
+        postsReceived = 0
+      }
+    }
+  }, 10_000)
 }
 
 // -- Startup --------------------------------------------------------
@@ -324,6 +373,7 @@ console.log(`  backend: ${BACKEND_URL}`)
 if (IS_ORCHESTRATOR) {
   console.log(`  backend_b: ${BACKEND_B_URL}`)
   console.log(`  max_running_local: ${MAX_RUNNING_LOCAL}`)
+  console.log(`  batch_threshold: ${BATCH_THRESHOLD} POSTs cumules (reset sur idle backends reel)`)
 }
 console.log(`  compose_dir: ${COMPOSE_DIR}`)
 console.log(`  idle_timeout: ${IDLE_TIMEOUT_MIN} min`)
