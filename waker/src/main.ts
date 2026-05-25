@@ -1,42 +1,59 @@
 /**
- * transcode-waker — scale-to-zero orchestrator pour transcode-service.
+ * transcode-waker — scale-to-zero + cluster orchestrator.
  *
- * Roles:
- *   1. Toujours up (~15-20 Mo RAM) sur l'host Spark A, port :8000
- *   2. Tous les appels HTTP sont proxifies vers le container ffmpeg :8001
- *   3. Si le container est down -> `docker compose up -d` + wait healthcheck
- *   4. Track last_activity timestamp
- *   5. Background tick (60s): si idle > IDLE_TIMEOUT_MIN ET 0 job actif -> stop
+ * Modes (auto-detected via env):
+ *   - worker (default, BACKEND_B_URL absent): proxy catch-all vers backend local 8001
+ *   - orchestrator (BACKEND_B_URL set): dispatch /jobs entre Spark A et Spark B
  *
  * Variables d'environnement:
- *   BACKEND_URL        (default http://127.0.0.1:8001)
+ *   BACKEND_URL        (default http://127.0.0.1:8001) — container local
+ *   BACKEND_B_URL      (optional)                     — waker peer (active orchestrator)
+ *   MAX_RUNNING_LOCAL  (default 3)                    — seuil dispatch local -> B
  *   COMPOSE_DIR        (default /home/pablo/transcode-service)
  *   IDLE_TIMEOUT_MIN   (default 30)
- *   WAKE_TIMEOUT_S     (default 30) - temps max pour qu'un container devienne healthy
+ *   WAKE_TIMEOUT_S     (default 30)
  *   LISTEN_PORT        (default 8000)
  */
-import { Hono } from 'hono'
+import { Hono, type Context } from 'hono'
 import { logger } from 'hono/logger'
 
-const VERSION = '0.1.0'
+const VERSION = '0.2.0'
 
 const BACKEND_URL = process.env.BACKEND_URL ?? 'http://127.0.0.1:8001'
+const BACKEND_B_URL = process.env.BACKEND_B_URL
+const MAX_RUNNING_LOCAL = Number(process.env.MAX_RUNNING_LOCAL ?? '3')
 const COMPOSE_DIR = process.env.COMPOSE_DIR ?? '/home/pablo/transcode-service'
 const IDLE_TIMEOUT_MIN = Number(process.env.IDLE_TIMEOUT_MIN ?? '30')
 const WAKE_TIMEOUT_S = Number(process.env.WAKE_TIMEOUT_S ?? '30')
 const LISTEN_PORT = Number(process.env.LISTEN_PORT ?? '8000')
 
+const IS_ORCHESTRATOR = !!BACKEND_B_URL
+
 let lastActivity = Date.now()
 let activeJobs = 0
 let containerState: 'unknown' | 'up' | 'down' = 'unknown'
+
+// Cluster state (orchestrator only)
+const jobBackends = new Map<string, 'A' | 'B'>()
+let backendBHealthy = false
+let pendingDispatchA = 0
+let pendingDispatchB = 0
 
 // -- Helpers --------------------------------------------------------
 
 async function isBackendHealthy(): Promise<boolean> {
   try {
-    const res = await fetch(`${BACKEND_URL}/health`, {
-      signal: AbortSignal.timeout(2000),
-    })
+    const res = await fetch(`${BACKEND_URL}/health`, { signal: AbortSignal.timeout(2000) })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+async function checkBackendBHealth(): Promise<boolean> {
+  if (!BACKEND_B_URL) return false
+  try {
+    const res = await fetch(`${BACKEND_B_URL}/waker/health`, { signal: AbortSignal.timeout(2000) })
     return res.ok
   } catch {
     return false
@@ -57,7 +74,6 @@ async function startContainer(): Promise<boolean> {
     console.error('[waker] docker compose up failed:', err.slice(0, 500))
     return false
   }
-  // Wait for healthcheck
   const deadline = Date.now() + WAKE_TIMEOUT_S * 1000
   while (Date.now() < deadline) {
     if (await isBackendHealthy()) {
@@ -83,21 +99,72 @@ async function stopContainer(): Promise<void> {
   containerState = 'down'
 }
 
+// Cache running count per backend (TTL 1s pour eviter rafale de fetches sur dispatch parallels)
+const runningCache = new Map<string, { running: number; ts: number }>()
+
+async function countRunningOn(url: string): Promise<number> {
+  const cached = runningCache.get(url)
+  if (cached && Date.now() - cached.ts < 1000) return cached.running
+  try {
+    const res = await fetch(`${url}/jobs`, { signal: AbortSignal.timeout(2000) })
+    if (!res.ok) return cached?.running ?? 0
+    const data = (await res.json()) as { jobs?: Array<{ status: string }> }
+    const running = (data.jobs ?? []).filter((j) => j.status === 'running').length
+    runningCache.set(url, { running, ts: Date.now() })
+    return running
+  } catch {
+    return cached?.running ?? 0
+  }
+}
+
+function chooseBackend(aRunning: number, bRunning: number): 'A' | 'B' {
+  const aLoad = aRunning + pendingDispatchA
+  const bLoad = bRunning + pendingDispatchB
+  if (aLoad < MAX_RUNNING_LOCAL) return 'A'
+  if (!backendBHealthy) return 'A' // fallback A si B down (queue cote A)
+  if (bLoad < MAX_RUNNING_LOCAL) return 'B'
+  return 'A'
+}
+
+function backendUrl(name: 'A' | 'B'): string {
+  return name === 'A' ? BACKEND_URL : BACKEND_B_URL!
+}
+
+async function proxyTo(targetUrl: string, c: Context): Promise<Response> {
+  const url = new URL(c.req.url)
+  const full = `${targetUrl}${c.req.path}${url.search}`
+  const headers = new Headers(c.req.raw.headers)
+  headers.delete('host')
+  const res = await fetch(full, {
+    method: c.req.method,
+    headers,
+    body: ['GET', 'HEAD'].includes(c.req.method) ? undefined : c.req.raw.body,
+    // @ts-ignore — Bun-specific: duplex pour streaming body
+    duplex: 'half',
+  })
+  return new Response(res.body, {
+    status: res.status,
+    statusText: res.statusText,
+    headers: res.headers,
+  })
+}
+
 // -- App / routes ---------------------------------------------------
 
 const app = new Hono()
 app.use('*', logger())
 
-// Endpoints de monitoring du waker lui-meme (preferer /waker/* pour ne pas
-// collisionner avec les routes du backend)
+// /waker/health: public, pour monitoring externe (Prometheus blackbox)
 app.get('/waker/health', (c) =>
   c.json({ status: 'ok', service: 'transcode-waker', version: VERSION }),
 )
 
-app.get('/waker/status', (c) => {
+// /waker/status: etat detaille (incluant cluster info si orchestrator)
+app.get('/waker/status', async (c) => {
   const idleMin = (Date.now() - lastActivity) / 60_000
-  return c.json({
+  const base: Record<string, unknown> = {
     version: VERSION,
+    role: IS_ORCHESTRATOR ? 'orchestrator' : 'worker',
     containerState,
     lastActivity: new Date(lastActivity).toISOString(),
     idleMinutes: Math.round(idleMin * 10) / 10,
@@ -106,67 +173,130 @@ app.get('/waker/status', (c) => {
       backendUrl: BACKEND_URL,
       idleTimeoutMin: IDLE_TIMEOUT_MIN,
       wakeTimeoutS: WAKE_TIMEOUT_S,
+      ...(IS_ORCHESTRATOR && {
+        backendBUrl: BACKEND_B_URL,
+        maxRunningLocal: MAX_RUNNING_LOCAL,
+      }),
     },
+  }
+  if (!IS_ORCHESTRATOR) return c.json(base)
+
+  const aRunning = await countRunningOn(BACKEND_URL)
+  const bRunning = backendBHealthy ? await countRunningOn(BACKEND_B_URL!) : 0
+  return c.json({
+    ...base,
+    cluster: {
+      A: { running: aRunning, healthy: containerState === 'up', url: BACKEND_URL, pending: pendingDispatchA },
+      B: { running: bRunning, healthy: backendBHealthy, url: BACKEND_B_URL, pending: pendingDispatchB },
+    },
+    totalRunning: aRunning + bRunning,
+    jobMappings: jobBackends.size,
   })
 })
 
-// Proxy catch-all vers le container ffmpeg
-app.all('*', async (c) => {
-  lastActivity = Date.now()
+// -- Orchestrator routes (si BACKEND_B_URL defini) ------------------
 
-  // Lazy wake si backend down
-  if (!(await isBackendHealthy())) {
-    const ok = await startContainer()
-    if (!ok) {
-      return c.json(
-        { error: 'backend_unavailable', detail: 'failed to start ffmpeg container' },
-        503,
-      )
+if (IS_ORCHESTRATOR) {
+  // POST /jobs: choisit le backend selon charge, capture jobId, store mapping
+  app.post('/jobs', async (c) => {
+    lastActivity = Date.now()
+    if (!(await isBackendHealthy())) {
+      const ok = await startContainer()
+      if (!ok) return c.json({ error: 'backend_unavailable' }, 503)
+    }
+    const aRunning = await countRunningOn(BACKEND_URL)
+    const bRunning = backendBHealthy ? await countRunningOn(BACKEND_B_URL!) : 0
+    const choice = chooseBackend(aRunning, bRunning)
+
+    activeJobs++
+    if (choice === 'A') pendingDispatchA++
+    else pendingDispatchB++
+
+    try {
+      const res = await proxyTo(backendUrl(choice), c)
+      const text = await res.clone().text()
+      try {
+        const job = JSON.parse(text) as { id?: string }
+        if (job.id) {
+          jobBackends.set(job.id, choice)
+          console.log(`[dispatch] job ${job.id} -> ${choice} (A:${aRunning + pendingDispatchA}/B:${bRunning + pendingDispatchB})`)
+        }
+      } catch {
+        // ignore parse: pas un JSON, ou error response
+      }
+      return new Response(text, {
+        status: res.status,
+        statusText: res.statusText,
+        headers: res.headers,
+      })
+    } catch (err) {
+      console.error('[dispatch] proxy error:', err)
+      return c.json({ error: 'dispatch_error', detail: String(err) }, 502)
+    } finally {
+      activeJobs--
+      if (choice === 'A') pendingDispatchA--
+      else pendingDispatchB--
+    }
+  })
+
+  // GET /jobs: agrege A + B (tries par createdAt desc)
+  app.get('/jobs', async (c) => {
+    const fetchSafe = (url: string) =>
+      fetch(`${url}/jobs`, { signal: AbortSignal.timeout(2000) })
+        .then((r) => (r.ok ? r.json() : { jobs: [] }))
+        .catch(() => ({ jobs: [] })) as Promise<{ jobs: Array<{ createdAt: number }> }>
+
+    const tasks: Promise<{ jobs: Array<{ createdAt: number }> }>[] = [fetchSafe(BACKEND_URL)]
+    if (backendBHealthy) tasks.push(fetchSafe(BACKEND_B_URL!))
+    const results = await Promise.all(tasks)
+    const allJobs = results.flatMap((r) => r.jobs ?? [])
+    allJobs.sort((a, b) => b.createdAt - a.createdAt)
+    return c.json({ count: allJobs.length, jobs: allJobs })
+  })
+
+  // GET /jobs/:id, GET /jobs/:id/output, DELETE /jobs/:id: route par mapping
+  const routeById = async (c: Context): Promise<Response> => {
+    lastActivity = Date.now()
+    const id = c.req.param('id') as string
+    const backend = jobBackends.get(id) ?? 'A'
+    const isLongOp = c.req.path.endsWith('/output')
+    if (isLongOp) activeJobs++
+    try {
+      const res = await proxyTo(backendUrl(backend), c)
+      if (c.req.method === 'DELETE' && res.ok) jobBackends.delete(id)
+      return res
+    } finally {
+      if (isLongOp) activeJobs--
     }
   }
+  app.get('/jobs/:id', routeById)
+  app.delete('/jobs/:id', routeById)
+  app.get('/jobs/:id/output', routeById)
+}
 
-  // Long-running operations (upload/download) tracked pour eviter shutdown au milieu
+// Catch-all: proxy local (routes /codecs, /health, /, etc.)
+app.all('*', async (c) => {
+  lastActivity = Date.now()
+  if (!(await isBackendHealthy())) {
+    const ok = await startContainer()
+    if (!ok) return c.json({ error: 'backend_unavailable' }, 503)
+  }
   const path = c.req.path
-  const isLongOp =
-    (path.startsWith('/jobs') && c.req.method === 'POST') ||
-    path.endsWith('/output')
+  const isLongOp = (path.startsWith('/jobs') && c.req.method === 'POST') || path.endsWith('/output')
   if (isLongOp) activeJobs++
-
   try {
-    const url = new URL(c.req.url)
-    const targetUrl = `${BACKEND_URL}${path}${url.search}`
-
-    // Clone headers, retire host (sinon le backend croit recevoir la requete d'un autre host)
-    const headers = new Headers(c.req.raw.headers)
-    headers.delete('host')
-
-    const res = await fetch(targetUrl, {
-      method: c.req.method,
-      headers,
-      body: ['GET', 'HEAD'].includes(c.req.method) ? undefined : c.req.raw.body,
-      // @ts-ignore - Bun-specific: duplex pour streaming body
-      duplex: 'half',
-    })
-
-    // Streaming response: re-emette tel quel au client
-    return new Response(res.body, {
-      status: res.status,
-      statusText: res.statusText,
-      headers: res.headers,
-    })
+    return await proxyTo(BACKEND_URL, c)
   } catch (err) {
     console.error('[waker] proxy error:', err)
-    return c.json(
-      { error: 'proxy_error', detail: err instanceof Error ? err.message : String(err) },
-      502,
-    )
+    return c.json({ error: 'proxy_error', detail: String(err) }, 502)
   } finally {
     if (isLongOp) activeJobs--
   }
 })
 
-// -- Background idle monitor ----------------------------------------
+// -- Background loops -----------------------------------------------
 
+// Idle monitor: stop container si rien en cours + > IDLE_TIMEOUT_MIN
 setInterval(async () => {
   const idleMin = (Date.now() - lastActivity) / 60_000
   if (idleMin > IDLE_TIMEOUT_MIN && activeJobs === 0 && containerState === 'up') {
@@ -174,27 +304,42 @@ setInterval(async () => {
   }
 }, 60_000)
 
+// Backend B health poll (orchestrator only)
+if (IS_ORCHESTRATOR) {
+  setInterval(async () => {
+    const newHealth = await checkBackendBHealth()
+    if (newHealth !== backendBHealthy) {
+      console.log(`[cluster] backend B ${newHealth ? 'recovered' : 'down'}`)
+      backendBHealthy = newHealth
+    }
+  }, 30_000)
+}
+
 // -- Startup --------------------------------------------------------
 
 console.log(`[transcode-waker v${VERSION}] listening on :${LISTEN_PORT}`)
 console.log(`  runtime: Bun ${Bun.version}`)
+console.log(`  role: ${IS_ORCHESTRATOR ? 'orchestrator' : 'worker'}`)
 console.log(`  backend: ${BACKEND_URL}`)
+if (IS_ORCHESTRATOR) {
+  console.log(`  backend_b: ${BACKEND_B_URL}`)
+  console.log(`  max_running_local: ${MAX_RUNNING_LOCAL}`)
+}
 console.log(`  compose_dir: ${COMPOSE_DIR}`)
 console.log(`  idle_timeout: ${IDLE_TIMEOUT_MIN} min`)
 
-// Check initial state du backend
-;(async () => {
-  const ok = await isBackendHealthy()
-  containerState = ok ? 'up' : 'down'
+void (async () => {
+  containerState = (await isBackendHealthy()) ? 'up' : 'down'
   console.log(`  initial backend state: ${containerState}`)
+  if (IS_ORCHESTRATOR) {
+    backendBHealthy = await checkBackendBHealth()
+    console.log(`  initial backend B: ${backendBHealthy ? 'healthy' : 'unhealthy'}`)
+  }
 })()
 
 export default {
   port: LISTEN_PORT,
   fetch: app.fetch,
-  // Important: 0 = pas de timeout idle Bun sur les connexions (sinon coupe les uploads longs)
   idleTimeout: 0,
-  // 12 GB max body (mirror nginx client_max_body_size et app container maxRequestBodySize)
-  // Sans ca, Bun limite a ~128 MB par defaut -> 502 Broken pipe sur uploads gros fichiers
   maxRequestBodySize: 12 * 1024 * 1024 * 1024,
 }

@@ -1,51 +1,49 @@
 # transcode-service
 
 Service de transcodage video on-demand exploitant le hardware NVENC 9eme generation
-(Blackwell) du DGX Spark A (192.168.1.31).
+(Blackwell) sur cluster DGX Spark A (.31) + B (.59).
 
-## Architecture
+## Architecture (cluster 2-noeuds)
 
 ```
-Internet --HTTPS--> Freebox 82.65.17.134 --DNAT 443--> VIP .200 (keepalived)
-                                                              |
-                                                              v
-                                              Pi nginx .60 (raspberrypi)
-                                              site: transcode.agi-so.fr
-                                              + Let's Encrypt + Basic Auth
-                                              + proxy_request_buffering off
+Internet --HTTPS--> Freebox --DNAT 443--> VIP .200 -> Pi nginx .60
                                                               |
                                                               v HTTP plain LAN
-                                              Spark A .31:8000
+                                              Spark A .31:8000 (orchestrator)
+                                              transcode-waker (Bun+Hono)
+                                              dispatch logic + scale-to-zero
+                                              ├──> http://127.0.0.1:8001 (container A)
+                                              │      NVENC GB10 #A
+                                              │
+                                              └──> http://10.0.0.2:8000 (waker B)
+                                                     via lien direct ConnectX-7 200 Gbps
+                                                     mesure 110 Gbit/s iperf3
                                                               |
                                                               v
-                                              transcode-waker.service (systemd)
-                                              - FastAPI proxy toujours up (~30 MB RAM)
-                                              - Spawn container ffmpeg a la demande
-                                              - Stop apres 30 min d'inactivite
-                                                              |
-                                                              v http://127.0.0.1:8001
-                                              container Docker "transcode-ffmpeg"
-                                              - base nvidia/cuda:12.6.0-runtime
-                                              - ffmpeg compile avec NVENC + libnpp
-                                              - app Bun + Hono (~50 Mo RAM)
-                                              - Endpoints: POST /jobs, etc.
-                                              - Volume /data
-                                                              |
-                                                              v
-                                              GPU NVIDIA GB10 (Blackwell)
-                                              NVENC h264/hevc/av1 hardware
+                                                Spark B .59:8000 (worker)
+                                                ├──> http://127.0.0.1:8001 (container B)
+                                                       NVENC GB10 #B
 ```
+
+**Dispatch logic** (orchestrator sur Spark A) :
+- POST /jobs: si Spark A < MAX_RUNNING_LOCAL (default 3) -> local, sinon -> Spark B
+- GET/DELETE /jobs/{id}, GET /jobs/{id}/output: route par mapping jobId -> backend (RAM)
+- GET /jobs: agregation A + B
+- Failure: si Spark B down (poll 30s), fallback automatique tout sur A
+
+Capacite cluster: **6 jobs running simultanes** (3 par Spark). Transparent cote client.
 
 ## Composants
 
 | Dossier | Role | Tourne ou |
 |---|---|---|
-| `docker/Dockerfile` | Image multi-stage: builder (compile ffmpeg+NVENC) + runtime (CUDA + Bun + Hono) | Build sur Spark A |
-| `app/` | Code Hono+Bun (TS) dans le container | Container ffmpeg sur Spark A |
-| `waker/` | Service Bun+Hono systemd toujours up qui orchestre le container | Host Spark A (`/opt/transcode-waker/`) |
+| `docker/Dockerfile` | Image multi-stage: builder (compile ffmpeg+NVENC) + runtime (CUDA + Bun + Hono) | Build sur Spark A + B |
+| `app/` | Code Hono+Bun (TS) dans le container | Container ffmpeg sur Spark A + B |
+| `waker/` | Service Bun+Hono systemd toujours up (orchestrator A / worker B) | Host Spark A + B (`/home/pablo/transcode-waker/`) |
+| `waker/systemd-orchestrator.conf` | Drop-in systemd qui active mode orchestrator (BACKEND_B_URL + MAX_RUNNING_LOCAL) | Spark A uniquement |
 | `nginx/` | Config nginx reverse proxy | Pi nginx .60 (`/etc/nginx/sites-enabled/`) |
 | `scripts/` | Deploy + build helpers | Lance depuis ton poste |
-| `docker-compose.yml` | Orchestration du container ffmpeg | Spark A |
+| `docker-compose.yml` | Orchestration du container ffmpeg | Spark A + B |
 
 ## Endpoints API (via container :8001 → proxifie via waker :8000 → nginx)
 
@@ -68,6 +66,12 @@ GET    /metrics              Prometheus metrics
 - Vidéo 1 GB upload: ~18 s, 4 GB: ~71 s
 
 **Multi-stream**: 4 streams x 250 MiB → 626 Mbps cumulé. PARALLEL=2 default, PARALLEL=4 OK sur fibre 1 Gbps.
+
+**Cluster 2-noeuds (mesure 2026-05-25)**:
+- 6 POST paralleles via orchestrator -> distribution 3+3 (A+B) en <1s
+- Test E2E: 6/6 done, 6/6 downloads OK
+- Lien inter-Spark 10.0.0.0/24 = 110 Gbit/s sustained iperf3 (vs LAN .60/.31 = 2.5 Gbps)
+- Gain attendu batch 20+ fichiers: ~1.5x-2x wall time selon PARALLEL client (utiliser PARALLEL=6 pour saturer les 6 slots cluster)
 
 NVENC GB10 Blackwell: H.264/HEVC/AV1 hardware encoding.
 4K AV1 encode: ~100+ fps. Transcode = nettement plus rapide que le transfert.
