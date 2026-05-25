@@ -17,7 +17,7 @@
 - **⚡ Recommandation concurrence**: **PARALLEL=2-4 cote client en HTTP/1.1** (pas HTTP/2).
   HTTP/2 multiplexing + window flow control 64 KB cap le throughput upload a ~55 Mbps/stream.
   HTTP/1.1 avec connexions distinctes utilise 4 cores TLS Pi en parallele (~175-250 Mbps/stream).
-  Si curl: ajouter `--http1.1`. Si Node fetch/axios: HTTP/1.1 par defaut OK.
+  Si curl: ajouter `--http1.1`. Si Node `fetch` natif (>= 18): HTTP/1.1 par defaut OK.
 
 ## 1. Authentification
 
