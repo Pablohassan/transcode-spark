@@ -39,7 +39,9 @@ services:
               capabilities: [gpu, video]
     # Limites pour eviter de saturer le Spark si runaway
     cpus: "8"
-    mem_limit: 32g
+    # 16g: a monter (24-32g) si on observe une saturation memoire / OOM sur batch large
+    # Sur 4 sessions cuvid+scale_cuda+nvenc, attendu ~8-12 GB sys. Marge OK.
+    mem_limit: 16g
     # Healthcheck propre
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8001/health"]
