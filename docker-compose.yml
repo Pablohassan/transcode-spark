@@ -17,10 +17,13 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
       TZ: Europe/Paris
-      # NVENC est un bloc materiel dedie - une session NVENC le sature deja.
-      # Au-dela (4 sessions), throttling round-robin sans gain. 1 = optimal pour
-      # cohabitation avec vLLM (GPU compute reste libre car NVENC est separe des SM).
-      MAX_CONCURRENT_JOBS: "1"
+      # NVENC GB10 = bloc materiel dedie, isole des SMs CUDA (vLLM ne partage pas).
+      # Driver datacenter 580.x: pas de limite sessions consumer.
+      # 2 = optimal pour batch: pendant que job N encode, job N+1 finit son upload
+      # et fait son probe -> pipeline I/O+compute superpose, ~40% wall time gagne.
+      # >2: throughput NVENC pur sature, gain marginal + risque mem_limit:16g sur
+      # multi-cuvid buffers en parallele.
+      MAX_CONCURRENT_JOBS: "2"
       JOB_TTL_MINUTES: "60"
     ports:
       # Bind sur localhost uniquement - le waker proxy depuis .31:8000 vers 127.0.0.1:8001
